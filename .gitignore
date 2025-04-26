@@ -1,1 +1,17 @@
+# Python
 backend/venv/
+*.pyc
+__pycache__/
+
+# Node.js
+frontend/node_modules/
+
+# Logs
+*.log
+
+# Environment
+.env
+
+# Misc
+.DS_Store
+*.pid
