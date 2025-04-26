@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wafer Defects Library System</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+    h1 { text-align: center; color: #333; }
+    .search-box { text-align: center; margin-bottom: 20px; }
+    input[type="text"] { width: 300px; padding: 8px; }
+    button { padding: 8px 12px; margin-left: 8px; cursor: pointer; }
+    button:disabled { background-color: #ccc; cursor: not-allowed; }
+    .defect { background: white; padding: 16px; margin: 10px 0; border-radius: 8px; box-shadow: 0 0 5px rgba(0,0,0,0.1); }
+    .defect h2 { margin: 0 0 10px; display: inline-block; }
+    .defect .pdf-link { margin-left: 10px; font-size: 0.9em; }
+    .modes { margin-left: 20px; }
+    .mode { margin-bottom: 10px; }
+    .mode img { max-width: 100px; display: block; margin-top: 4px; }
+    .actions { margin-top: 10px; }
+    .actions button { margin-right: 6px; }
+
+    /* Modal styles */
+    .modal {
+      display: none; position: fixed; z-index: 999; left: 0; top: 0;
+      width: 100%; height: 100%; overflow: auto;
+      background-color: rgba(0,0,0,0.4);
+    }
+    .modal-content {
+      background-color: #fff; margin: 10% auto; padding: 20px;
+      border: 1px solid #888; width: 90%; max-width: 500px; border-radius: 10px;
+    }
+    .close { color: #aaa; float: right; font-size: 24px; font-weight: bold; cursor: pointer; }
+    .close:hover { color: #000; }
+    .form-group { margin-bottom: 12px; }
+    label { display: block; margin-bottom: 4px; }
+    input, textarea { width: 100%; padding: 6px; }
+    .preview-img { max-width: 100px; margin-top: 6px; }
+    
+    /* Loading spinner */
+    .spinner {
+      display: none; 
+      border: 4px solid #f3f3f3; 
+      border-top: 4px solid #3498db; 
+      border-radius: 50%; 
+      width: 40px; 
+      height: 40px; 
+      animation: spin 2s linear infinite;
+      margin: 0 auto;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Wafer Defects Library System</h1>
+
+  <div class="search-box">
+    <input type="text" id="searchQuery" placeholder="Search defects..." aria-label="Search defects">
+    <button onclick="searchDefects()" aria-label="Search button">Search</button>
+  </div>
+
+  <div id="defectsContainer"></div>
+
+  <div class="spinner" id="loadingSpinner"></div> <!-- Loading Spinner -->
+
+  <!-- Modal for editing -->
+  <div id="editModal" class="modal">
+    <div class="modal-content">
+      <span class="close" onclick="closeModal()" aria-label="Close modal">&times;</span>
+      <form id="editForm" onsubmit="submitEdit(event)">
+        <input type="hidden" id="editTargetId">
+        <input type="hidden" id="editType"> <!-- 'defect' or 'mode' -->
+
+        <div class="form-group" id="defectNameGroup">
+          <label for="defectName">Defect Name</label>
+          <input type="text" id="defectName" aria-label="Defect name">
+        </div>
+
+        <div class="form-group" id="pdfGroup">
+          <label for="pdfFile">Replace PDF</label>
+          <input type="file" id="pdfFile" accept=".pdf" aria-label="Replace PDF">
+        </div>
+
+        <div class="form-group" id="modeGroup">
+          <label for="modeText">Mode</label>
+          <input type="text" id="modeText" aria-label="Mode">
+        </div>
+
+        <div class="form-group" id="descGroup">
+          <label for="descText">Description</label>
+          <textarea id="descText" aria-label="Description"></textarea>
+        </div>
+
+        <div class="form-group" id="imageGroup">
+          <label for="imageFile">Replace Image</label>
+          <input type="file" id="imageFile" accept="image/*" onchange="previewImage()" aria-label="Replace image">
+          <img id="imagePreview" class="preview-img" style="display:none;" alt="Image preview">
+        </div>
+
+        <button type="submit" aria-label="Save changes">Save Changes</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    async function searchDefects() {
+      const query = document.getElementById("searchQuery").value;
+      toggleLoadingState(true); // Show loading spinner
+
+      try {
+        const res = await fetch(`/defect/search?query=${encodeURIComponent(query)}`);
+        if (!res.ok) {
+          throw new Error("Failed to fetch defects.");
+        }
+        const data = await res.json();
+        renderDefects(data);
+      } catch (error) {
+        alert(`Error: ${error.message}`);
+      } finally {
+        toggleLoadingState(false); // Hide loading spinner
+      }
+    }
+
+    function toggleLoadingState(isLoading) {
+      document.getElementById("loadingSpinner").style.display = isLoading ? "block" : "none";
+      document.querySelector("button[aria-label='Search button']").disabled = isLoading;
+    }
+
+    function renderDefects(defects) {
+      const container = document.getElementById("defectsContainer");
+      container.innerHTML = "";
+
+      if (!defects.length) {
+        container.innerHTML = "<p>No defects found.</p>";
+        return;
+      }
+
+      defects.forEach(defect => {
+        const div = document.createElement("div");
+        div.className = "defect";
+        div.innerHTML = `
+          <h2>${defect.name}</h2>
+          ${defect.pdf_url ? `<a class="pdf-link" href="${defect.pdf_url}" target="_blank">View PDF</a>` : ""}
+          <div class="actions">
+            <button onclick="openEditDefect(${defect.id}, '${defect.name}')" aria-label="Edit defect">Edit</button>
+            <button onclick="deleteDefect(${defect.id})" aria-label="Delete defect">Delete</button>
+          </div>
+          <div class="modes">
+            ${defect.modes.map(mode => `
+              <div class="mode">
+                <strong>${mode.mode}</strong>: ${mode.description}
+                ${mode.image_url ? `<img src="${mode.image_url}" alt="Mode Image">` : ""}
+                <div class="actions">
+                  <button onclick="openEditMode(${mode.id}, '${mode.mode}', \`${mode.description}\`)" aria-label="Edit mode">Edit Mode</button>
+                  <button onclick="deleteMode(${mode.id})" aria-label="Delete mode">Delete Mode</button>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    function openEditDefect(id, name) {
+      document.getElementById("editTargetId").value = id;
+      document.getElementById("editType").value = "defect";
+      document.getElementById("defectName").value = name;
+      toggleVisibility(true, false);
+      showModal();
+    }
+
+    function openEditMode(id, mode, description) {
+      document.getElementById("editTargetId").value = id;
+      document.getElementById("editType").value = "mode";
+      document.getElementById("modeText").value = mode;
+      document.getElementById("descText").value = description;
+      document.getElementById("imageFile").value = "";
+      document.getElementById("imagePreview").style.display = "none";
+      toggleVisibility(false, true);
+      showModal();
+    }
+
+    function toggleVisibility(isDefect, isMode) {
+      document.getElementById("defectNameGroup").style.display = isDefect ? "block" : "none";
+      document.getElementById("pdfGroup").style.display = isDefect ? "block" : "none";
+      document.getElementById("modeGroup").style.display = isMode ? "block" : "none";
+      document.getElementById("descGroup").style.display = isMode ? "block" : "none";
+      document.getElementById("imageGroup").style.display = isMode ? "block" : "none";
+    }
+
+    function showModal() {
+      document.getElementById("editModal").style.display = "block";
+    }
+
+    function closeModal() {
+      document.getElementById("editModal").style.display = "none";
+    }
+
+    async function submitEdit(e) {
+      e.preventDefault();
+      const id = document.getElementById("editTargetId").value;
+      const type = document.getElementById("editType").value;
+      const formData = new FormData();
+
+      try {
+        if (type === "defect") {
+          formData.append("defect_name", document.getElementById("defectName").value);
+          const pdfFile = document.getElementById("pdfFile").files[0];
+          if (pdfFile) formData.append("pdf", pdfFile);
+          const res = await fetch(`/defect/${id}`, {
+            method: "PUT",
+            body: formData
+          });
+
+          if (!res.ok) throw new Error("Failed to update defect.");
+        } else if (type === "mode") {
+          formData.append("mode", document.getElementById("modeText").value);
+          formData.append("description", document.getElementById("descText").value);
+          const imageFile = document.getElementById("imageFile").files[0];
+          if (imageFile) formData.append("image", imageFile);
+          const res = await fetch(`/defect/mode/${id}`, {
+            method: "PUT",
+            body: formData
+          });
+
+          if (!res.ok) throw new Error("Failed to update mode.");
+        }
+
+        closeModal();
+        searchDefects(); // Refresh the defects list
+      } catch (error) {
+        alert(`Error: ${error.message}`);
+      }
+    }
+
+    async function deleteDefect(id) {
+      if (!confirm("Are you sure you want to delete this entire defect?")) return;
+
+      try {
+        const res = await fetch(`/defect/${id}`, { method: "DELETE" });
+        if (!res.ok) throw new Error("Failed to delete defect.");
+        searchDefects();
+      } catch (err) {
+        alert("Error: " + err.message);
+      }
+    }
+
+    async function deleteMode(id) {
+      if (!confirm("Are you sure you want to delete this mode?")) return;
+
+      try {
+        const res = await fetch(`/defect/mode/${id}`, { method: "DELETE" });
+        if (!res.ok) throw new Error("Failed to delete mode.");
+        searchDefects();
+      } catch (err) {
+        alert("Error: " + err.message);
+      }
+    }
+
+    function previewImage() {
+      const fileInput = document.getElementById("imageFile");
+      const preview = document.getElementById("imagePreview");
+      const file = fileInput.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = e => {
+          preview.src = e.target.result;
+          preview.style.display = "block";
+        };
+        reader.readAsDataURL(file);
+      } else {
+        preview.style.display = "none";
+      }
+    }
+  </script>
+
+</body>
+</html>
