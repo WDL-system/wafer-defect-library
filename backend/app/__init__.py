@@ -36,12 +36,24 @@ def create_app():
     app.register_blueprint(defect_bp)
     app.register_blueprint(file_bp) # Register file_bp
 
+    _ensure_upload_folders(app)
+
     # Home route - Render index.html dynamically
     @app.route('/')
     def index():
         return render_template('index.html')
 
     return app
+
+# Helper Functions
+def _ensure_upload_folders(app):
+    """Ensures that the upload folders exist."""
+    try:
+        os.makedirs(app.config['UPLOAD_FOLDER_IMAGES'], exist_ok=True)
+        os.makedirs(app.config['UPLOAD_FOLDER_PDFS'], exist_ok=True)
+    except OSError as e:
+        app.logger.error(f"Error creating upload folders: {e}")
+        # Consider raising the exception again or handling it more robustly
 
 # Add these utility functions to app/__init__.py
 def save_file(file, upload_folder):
@@ -52,8 +64,12 @@ def save_file(file, upload_folder):
         filename = secure_filename(file.filename)  # Sanitize the filename
         os.makedirs(upload_folder, exist_ok=True)  # Ensure the folder exists
         filepath = os.path.join(upload_folder, filename)
-        file.save(filepath)
-        return filename
+        try: 
+            file.save(filepath)
+            return filename
+        except Exception as e: 
+            print(f"Error saving file: {e}")
+            return None
     return None
 
 def delete_file(upload_folder, filename):
@@ -61,4 +77,11 @@ def delete_file(upload_folder, filename):
     if filename:
         filepath = os.path.join(upload_folder, filename)
         if os.path.exists(filepath):
-            os.remove(filepath)
+            try:
+                os.remove(filepath)
+            except Exception as e:
+                print(f"Error deleting file: {e}") # Log error, but don't crash
+                return False # Indicate failure
+            return True #Indicate Success
+        return False # File does not exist
+    return False # No filename provided

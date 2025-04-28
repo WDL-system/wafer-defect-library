@@ -1,10 +1,10 @@
 from flask import Blueprint, request, jsonify, current_app
 from app.models import db, Defect, DefectMode, PDFFile
-from app.validation import validate_file, is_allowed
 import os
 import json
 import logging
 from werkzeug.utils import secure_filename # Import secure_filename
+from sqlalchemy import DateTime
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -15,6 +15,15 @@ bp = Blueprint('defect_routes', __name__)
 # Allowed file extensions
 ALLOWED_IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 ALLOWED_PDF_EXTENSIONS = {'pdf'}
+
+# Configuration
+class Config:
+    SECRET_KEY = os.environ.get('SECRET_KEY', 'your_secret_key')  # Fallback to a default secret key
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL', 'sqlite:///site.db')  # Use SQLite if no DATABASE_URL
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    UPLOAD_FOLDER_IMAGES = 'uploads/images'
+    UPLOAD_FOLDER_PDFS = 'uploads/pdfs'
+    MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB max upload size
 
 def success(message, data=None):
     """Helper to send success response."""
@@ -40,9 +49,15 @@ def save_file(file, upload_folder):
         filename = secure_filename(file.filename)  # Sanitize the filename
         os.makedirs(upload_folder, exist_ok=True)  # Ensure the folder exists
         filepath = os.path.join(upload_folder, filename)
-        file.save(filepath)
-        return filename
-    return None # important:  return None if no file
+        try:
+            file.save(filepath)
+            return filename
+        except Exception as e:
+            print(f"Error saving file: {e}") # Log the error
+            return None # IMPORTANT:  Return None on error!
+    return None  # important:  return None if no file
+
+
 
 @bp.route('/admin/upload', methods=['POST'])
 def upload_defect():
@@ -76,7 +91,7 @@ def upload_defect():
         type: array
         items:
           type: file
-        required: false
+          required: false
       - name: pdf
         in: formData
         type: file
@@ -104,19 +119,36 @@ def upload_defect():
 
         if not pdf_file:
             return error('A PDF file is required')
+
+        # Check PDF file size *before* further processing
+        pdf_file.seek(0, os.SEEK_END)
+        pdf_file_size = pdf_file.tell()
+        pdf_file.seek(0)  # Reset file pointer
+        if pdf_file_size > current_app.config['MAX_CONTENT_LENGTH']:  # Use the application-wide config
+            return error(f"PDF file is too large. Maximum allowed size is {current_app.config['MAX_CONTENT_LENGTH']} bytes", 413)
+
         elif not is_allowed_file(pdf_file.filename, ALLOWED_PDF_EXTENSIONS):
             return error('Only PDF files are allowed')
 
+
+
         for i, image in enumerate(images):
-            if image and not is_allowed_file(image.filename, ALLOWED_IMAGE_EXTENSIONS):
-                return error(f'Image for mode {modes[i]} must be a JPG or PNG file')
+            if image:
+                # Check image file size *before* further processing
+                image.seek(0, os.SEEK_END)
+                image_size = image.tell()
+                image.seek(0) #reset
+                if image_size > current_app.config['MAX_CONTENT_LENGTH']:  # Use the application-wide config
+                    return error(f"Image for mode {modes[i]} is too large. Maximum allowed size is {current_app.config['MAX_CONTENT_LENGTH']} bytes", 413)
+                elif not is_allowed_file(image.filename, ALLOWED_IMAGE_EXTENSIONS):
+                    return error(f'Image for mode {modes[i]} must be a JPG or PNG file')
 
         # Ensure the number of images matches the number of modes (if provided)
         if len(images) > len(modes):
             return error('Number of images exceeds the number of defect modes')
 
         # === PROCESSING ===
-        new_defect = Defect(name=name)
+        new_defect = Defect(title=name)
         db.session.add(new_defect)
         db.session.flush()
 
@@ -157,7 +189,7 @@ def search_defect():
     """
     query = request.args.get('query', '').lower()
     defects = Defect.query.join(DefectMode).filter(
-        (Defect.name.ilike(f'%{query}%')) |
+        (Defect.title.ilike(f'%{query}%')) |
         (DefectMode.mode.ilike(f'%{query}%')) |
         (DefectMode.description.ilike(f'%{query}%'))
     ).distinct(Defect.id).all() # Use distinct to avoid duplicates if a defect has multiple matching modes
@@ -166,7 +198,7 @@ def search_defect():
     for defect in defects:
         defect_data = {
             'id': defect.id,
-            'name': defect.name,
+            'name': defect.title,
             'pdf_url': f"/pdfs/{defect.pdf.filename}" if defect.pdf else None,
             'modes': [{
                 'id': mode.id,
@@ -199,7 +231,7 @@ def get_defect(defect_id):
     defect = Defect.query.get_or_404(defect_id)
     defect_data = {
         'id': defect.id,
-        'name': defect.name,
+        'name': defect.title,
         'pdf_url': f"/pdfs/{defect.pdf.filename}" if defect.pdf else None,
         'modes': [{
             'id': mode.id,
@@ -313,15 +345,22 @@ def edit_defect(defect_id):
 
         # Update defect name if provided
         name = strip_or_none(request.form.get('defect_name'))
-        if name and name != defect.name:
+        if name and name != defect.title:
             if len(name) < 3:
                 return error('Defect name must be at least 3 characters long')
-            defect.name = name
+            defect.title = name
             updated = True
 
         # Replace PDF if provided
         pdf_file = request.files.get('pdf')
         if pdf_file:
+            # Check PDF file size
+            pdf_file.seek(0, os.SEEK_END)
+            pdf_file_size = pdf_file.tell()
+            pdf_file.seek(0)
+            if pdf_file_size > current_app.config['MAX_CONTENT_LENGTH']:
+                return error(f"PDF file is too large. Maximum allowed size is {current_app.config['MAX_CONTENT_LENGTH']} bytes", 413)
+
             if not is_allowed_file(pdf_file.filename, ALLOWED_PDF_EXTENSIONS):
                 return error('Only PDF files are allowed')
 
@@ -399,6 +438,13 @@ def edit_defect_mode(mode_id):
 
         new_image = request.files.get('image')
         if new_image:
+            # Check image file size
+            new_image.seek(0, os.SEEK_END)
+            new_image_size = new_image.tell()
+            new_image.seek(0)
+            if new_image_size > current_app.config['MAX_CONTENT_LENGTH']:
+                return error(f"Image is too large. Maximum allowed size is {current_app.config['MAX_CONTENT_LENGTH']} bytes", 413)
+
             if not is_allowed_file(new_image.filename, ALLOWED_IMAGE_EXTENSIONS):
                 return error('Image must be a JPG or PNG file')
 
@@ -470,12 +516,18 @@ def update_defect_details(defect_id):
         # Validate defect name
         if not name or len(name) < 3:
             return error('Defect name must be at least 3 characters long')
-        if name != defect.name:
-            defect.name = name
+        if name != defect.title:
+            defect.title = name
             updated = True
 
         # Validate and update PDF
         if pdf_file:
+            # Check PDF file size
+            pdf_file.seek(0, os.SEEK_END)
+            pdf_file_size = pdf_file.tell()
+            pdf_file.seek(0)
+            if pdf_file_size > current_app.config['MAX_CONTENT_LENGTH']:
+                return error(f"PDF file is too large. Maximum allowed size is {current_app.config['MAX_CONTENT_LENGTH']} bytes", 413)
             if not is_allowed_file(pdf_file.filename, ALLOWED_PDF_EXTENSIONS):
                 return error('Only PDF files are allowed')
             if defect.pdf and defect.pdf.filename:
@@ -520,12 +572,24 @@ def update_defect_details(defect_id):
                 # Handle new image upload for existing mode
                 if new_image and isinstance(new_image, str): # Assuming frontend sends filename of newly uploaded image
                     uploaded_file = request.files.get(new_image)
-                    if uploaded_file and is_allowed_file(uploaded_file.filename, ALLOWED_IMAGE_EXTENSIONS):
-                        if existing_mode.image_filename:
-                            delete_file(current_app.config['UPLOAD_FOLDER_IMAGES'], existing_mode.image_filename)
-                        image_filename = save_file(uploaded_file, current_app.config['UPLOAD_FOLDER_IMAGES'])
-                        existing_mode.image_filename = image_filename
-                        updated = True
+                    if uploaded_file :
+                        #check size
+                        uploaded_file.seek(0, os.SEEK_END)
+                        image_size = uploaded_file.tell()
+                        uploaded_file.seek(0)
+                        if image_size > current_app.config['MAX_CONTENT_LENGTH']:
+                            return error(f'Image file too large for mode {mode_name}. Max size:{current_app.config["MAX_CONTENT_LENGTH"]}',413)
+                        elif  is_allowed_file(uploaded_file.filename, ALLOWED_IMAGE_EXTENSIONS):
+                            if existing_mode.image_filename:
+                                delete_file(current_app.config['UPLOAD_FOLDER_IMAGES'], existing_mode.image_filename)
+                            image_filename = save_file(uploaded_file, current_app.config['UPLOAD_FOLDER_IMAGES'])
+                            existing_mode.image_filename = image_filename
+                            updated = True
+                        else:
+                            return error(f'Invalid image file for mode {mode_name}')
+
+
+
                     elif uploaded_file:
                         return error(f'Invalid image file for mode {mode_name}')
 
@@ -535,8 +599,18 @@ def update_defect_details(defect_id):
                 # New mode, create it
                 image_file = request.files.get(f'new_image_{len(updated_mode_ids)}') # Assuming frontend sends new images with unique keys
                 image_filename = None
-                if image_file and is_allowed_file(image_file.filename, ALLOWED_IMAGE_EXTENSIONS):
-                    image_filename = save_file(image_file, current_app.config['UPLOAD_FOLDER_IMAGES'])
+                if image_file:
+                    #check size
+                    image_file.seek(0, os.SEEK_END)
+                    image_size = image_file.tell()
+                    image_file.seek(0)
+                    if image_size > current_app.config['MAX_CONTENT_LENGTH']:
+                        return error(f'Image file too large for new mode {mode_name}. Max size:{current_app.config["MAX_CONTENT_LENGTH"]}',413)
+                    elif is_allowed_file(image_file.filename, ALLOWED_IMAGE_EXTENSIONS):
+                        image_filename = save_file(image_file, current_app.config['UPLOAD_FOLDER_IMAGES'])
+                    else:
+                        return error(f'Invalid image file for new mode {mode_name}')
+
                 elif image_file:
                     return error(f'Invalid image file for new mode {mode_name}')
 
